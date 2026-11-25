@@ -1,0 +1,28 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info/
+
+# Virtual environments
+.venv
+
+# Caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Generated PSF / result images (regenerate with the scripts)
+PSF_*.tif
+PSF_*.png
+*_deconvolved.tif
+*_PSF_fitted.tif
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

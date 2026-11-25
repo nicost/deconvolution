@@ -1,0 +1,22 @@
+[project]
+name = "deconvolution"
+version = "0.1.0"
+description = "Microscope deconvolution: PSF modelling, gradient-consensus, and semi-blind Zernike fitting"
+readme = "README.md"
+authors = [
+    { name = "Nico Stuurman", email = "oincst@gmail.com" }
+]
+requires-python = ">=3.12, <3.14"
+dependencies = [
+    "torch",
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "tifffile>=2026.10.15",
+]
+
+# These are run-anywhere scripts (they import each other as siblings), not an
+# installed package, so there is no build-system or console-script entry point.
+# Run them with, for example:  uv run src/make_airy_psf.py
+[tool.uv]
+package = false
