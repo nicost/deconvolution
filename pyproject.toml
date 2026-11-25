@@ -21,6 +21,20 @@ dependencies = [
 [tool.uv]
 package = false
 
+# On Windows and Linux, get PyTorch built for NVIDIA GPUs (CUDA 13.2; needs an
+# NVIDIA driver from the 580 series or newer).  The plain PyPI build is
+# CPU-only on Windows.  Macs keep using PyPI, which includes Apple GPU (MPS)
+# support.
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu132", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+]
+
 # Test dependencies.  uv installs the "dev" group by default, so `uv run pytest`
 # just works.
 [dependency-groups]
