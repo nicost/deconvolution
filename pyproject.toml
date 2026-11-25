@@ -20,3 +20,13 @@ dependencies = [
 # Run them with, for example:  uv run src/make_airy_psf.py
 [tool.uv]
 package = false
+
+# Test dependencies.  uv installs the "dev" group by default, so `uv run pytest`
+# just works.
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]          # let the tests import the scripts in src/
+testpaths = ["tests"]
+markers = ["slow: end-to-end tests that take a few seconds (deselect with -m 'not slow')"]

@@ -139,8 +139,26 @@ constants at the top of a script to match your data.
 - The fitting schedule and step sizes (`E_STEPS`, `M_ITERS`, `ADAM_LR`,
   `ROUNDS_PER_STAGE`, `L2_LAMBDA`) are constants near the top of
   `deconvolve_semiblind.py`; you may need to adjust them for very different data.
+- **The aberration fit is still weak.** The PSF-fitting step works well when the
+  object is known, but in the full alternating loop the object estimate tends to
+  absorb the PSF error (the object/PSF degeneracy of blind deconvolution), so the
+  recovered aberration is currently smaller than the true one. Treat the fitted
+  coefficients as a first pass; strengthening this (e.g. an object sparsity prior
+  or joint optimization) is future work. See `tests/README.md`.
 - A GPU makes this much faster. Without one it still works; use `CROP_XY` to keep
   the first runs small.
+
+## Tests
+
+Fast, CPU-only tests live in [`tests/`](tests/) and need no data. From the
+repository root:
+
+```bash
+uv run pytest                 # run everything
+uv run pytest -m "not slow"   # skip the few-second end-to-end test
+```
+
+See [`tests/README.md`](tests/README.md) for details and what each file covers.
 
 ## Credit and references
 

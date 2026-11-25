@@ -26,3 +26,5 @@ PSF_*.png
 Thumbs.db
 .idea/
 .vscode/
+*.swp
+*~
