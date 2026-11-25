@@ -93,3 +93,31 @@ def test_deconvolve_runs_fixed_number_of_steps():
     recon = rc.gradient_consensus_deconvolve(
         image, otf, otfT, otfotfT, gen, n_steps=3, verbose=False)
     assert torch.isfinite(recon).all()
+
+
+# --- output_dir_for: results must stay out of the Micro-Manager data folder ---
+
+def test_output_dir_default_is_sibling_of_data_dir(tmp_path):
+    data = tmp_path / "Dataset_1"
+    data.mkdir()
+    out = rc.output_dir_for(data)
+    assert out == (tmp_path / "Dataset_1_deconvolved").resolve()
+    assert out.is_dir()
+
+
+def test_output_dir_explicit_folder_is_used_and_created(tmp_path):
+    data = tmp_path / "Dataset_1"
+    data.mkdir()
+    out = rc.output_dir_for(data, tmp_path / "results" / "run1")
+    assert out == (tmp_path / "results" / "run1").resolve()
+    assert out.is_dir()
+
+
+def test_output_dir_inside_data_dir_is_refused(tmp_path):
+    import pytest
+    data = tmp_path / "Dataset_1"
+    data.mkdir()
+    for bad in (data, data / "sub", data / "sub" / "deeper", data / ".." / "Dataset_1"):
+        with pytest.raises(SystemExit):
+            rc.output_dir_for(data, bad)
+    assert not (data / "sub").exists()

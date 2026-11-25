@@ -27,15 +27,19 @@ Run it (after the data is in place) with:
 
     uv run src/deconvolve_semiblind.py
     uv run src/deconvolve_semiblind.py ~/Images/BPAE_100x_ZStack_3Crop
+    uv run src/deconvolve_semiblind.py ~/Images/BPAE_100x_ZStack_3Crop --output ~/Results
 
-The fitted aberrations are printed; the refined PSF and the deconvolved stack are
-saved next to the data, and before/after projections are shown.  Each candidate
+The fitted aberrations are printed and before/after projections are shown.  The
+refined PSF and the deconvolved stack are saved in a folder next to the data
+folder, "<data folder>_deconvolved" (or the folder given with --output).  They
+are never saved inside the data folder: Micro-Manager would then fail to read
+the dataset back.  Each candidate
 PSF costs one (short) deconvolution, so without a GPU set CROP_XY below and/or
 trim ABERRATIONS to keep the search quick.
 """
 
+import argparse
 import re
-import sys
 import timeit
 from pathlib import Path
 
@@ -44,8 +48,8 @@ import tifffile
 
 from pupil_psf import (DEFAULT_ABERRATIONS, PupilPSF, _save_psf_tiff, _show_psf,
                        odd_size)
-from rl_core import (gradient_consensus_deconvolve, otf_from_psf, pick_device,
-                     show_mips, torch)
+from rl_core import (gradient_consensus_deconvolve, otf_from_psf, output_dir_for,
+                     pick_device, show_mips, torch)
 
 DATA_DIR = Path("~/Images/BPAE_100x_ZStack_3Crop").expanduser()
 IMAGE_NAME = "BPAE_100x_ZStack_3_MMStack_Pos0.ome.tif"
@@ -151,7 +155,16 @@ def fit_coefficients(model, image, device, refine=REFINE_OTHERS, verbose=True):
 
 
 if __name__ == "__main__":
-    data_dir = Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 else DATA_DIR
+    parser = argparse.ArgumentParser(
+        description="Semi-blind deconvolution: fit PSF aberrations and deconvolve.")
+    parser.add_argument("data_dir", nargs="?", type=Path, default=DATA_DIR,
+                        help=f"Micro-Manager data folder (default: {DATA_DIR})")
+    parser.add_argument("-o", "--output", type=Path, default=None,
+                        help="folder for the results (default: '<data_dir>_deconvolved' "
+                             "next to the data folder; may not be inside the data folder)")
+    args = parser.parse_args()
+    data_dir = args.data_dir.expanduser()
+    out_dir = output_dir_for(data_dir, args.output)   # checked before the slow fit
 
     # --- Load the image ---------------------------------------------------------
     with tifffile.TiffFile(data_dir / IMAGE_NAME) as tif:
@@ -193,12 +206,12 @@ if __name__ == "__main__":
     # --- Save the refined PSF and the deconvolved stack -------------------------
     stem = Path(IMAGE_NAME).name.removesuffix('.ome.tif')
     psf_np = model.render_numpy(coeffs)
-    psf_out = data_dir / f"{stem}_Cy3_PSF_fitted.tif"
+    psf_out = out_dir / f"{stem}_Cy3_PSF_fitted.tif"
     _save_psf_tiff(psf_np, psf_out, xy_um, z_um)
     print(f"Saved {psf_out}")
 
     recon_np = recon.cpu().numpy().astype(np.float32)
-    recon_out = data_dir / f"{stem}_Cy3_semiblind_deconvolved.tif"
+    recon_out = out_dir / f"{stem}_Cy3_semiblind_deconvolved.tif"
     tifffile.imwrite(recon_out, recon_np, imagej=True, resolution=(1 / xy_um, 1 / xy_um),
                      metadata={"axes": "ZYX", "spacing": z_um, "unit": "micron"})
     print(f"Saved {recon_out}")

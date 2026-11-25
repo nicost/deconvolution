@@ -11,6 +11,7 @@ looks for it.  If your copy of the data is somewhere else, give the folder
 
     uv run src/deconvolution/deconvolve_gradient_consensus.py "D:/my data/BPAE_100x_ZStack_3Crop"
     uv run src/deconvolution/deconvolve_gradient_consensus.py "D:/my data/BPAE_100x_ZStack_3Crop" PSF_605nm.tif
+    uv run src/deconvolution/deconvolve_gradient_consensus.py "D:/my data/BPAE_100x_ZStack_3Crop" --output "D:/results"
 
 The method is Richardson-Lucy deconvolution, adapted from the Colab notebook by
 James Manton (MRC LMB) and colleagues (deconvolution/gradientConsensusDeconvolution.py).
@@ -38,22 +39,25 @@ The calculations run on the graphics card (GPU) if there is one, which is much
 faster.  Without a GPU it works too, but slowly: set CROP_XY below to try it on
 the center of the image first.
 
-The result is saved next to the data as a 32-bit z-stack with the same pixel
-size, and maximum intensity projections of before and after are shown.
+The result is saved as a 32-bit z-stack with the same pixel size, in a folder
+next to the data folder, "<data folder>_deconvolved" (or the folder given with
+--output), and maximum intensity projections of before and after are shown.
+It is never saved inside the data folder: Micro-Manager would then fail to read
+the dataset back.
 
 The heart of the method (the forward model and the iteration loop) now lives in
 rl_core.py, so that other scripts can reuse exactly the same code.
 """
 
+import argparse
 import re
-import sys
 from pathlib import Path
 
 import numpy as np
 import tifffile
 
-from rl_core import (gradient_consensus_deconvolve, otf_from_psf, pick_device,
-                     show_mips, torch)
+from rl_core import (gradient_consensus_deconvolve, otf_from_psf, output_dir_for,
+                     pick_device, show_mips, torch)
 
 DATA_DIR = Path("Z:/ImageAnalysisCourse/ZStack_100x_BPAE/BPAE_100x_ZStack_3Crop")
 IMAGE_NAME = "BPAE_100x_ZStack_3_MMStack_Pos0.ome.tif"
@@ -70,8 +74,19 @@ SEED = 0                          # makes the random splits the same every run
 
 
 if __name__ == "__main__":
-    data_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else DATA_DIR
-    psf_file = Path(sys.argv[2]) if len(sys.argv) > 2 else PSF_FILE
+    parser = argparse.ArgumentParser(
+        description="Richardson-Lucy gradient-consensus deconvolution.")
+    parser.add_argument("data_dir", nargs="?", type=Path, default=DATA_DIR,
+                        help=f"Micro-Manager data folder (default: {DATA_DIR})")
+    parser.add_argument("psf_file", nargs="?", type=Path, default=PSF_FILE,
+                        help=f"PSF TIFF from make_airy_psf.py (default: {PSF_FILE})")
+    parser.add_argument("-o", "--output", type=Path, default=None,
+                        help="folder for the result (default: '<data_dir>_deconvolved' "
+                             "next to the data folder; may not be inside the data folder)")
+    args = parser.parse_args()
+    data_dir = args.data_dir.expanduser()
+    psf_file = args.psf_file.expanduser()
+    out_dir = output_dir_for(data_dir, args.output)
 
     # --- Load the image and the PSF ---------------------------------------------
     with tifffile.TiffFile(data_dir / IMAGE_NAME) as tif:
@@ -114,7 +129,7 @@ if __name__ == "__main__":
 
     # --- Save the result with the same pixel size as the original ---------------
     recon_np = recon.cpu().numpy().astype(np.float32)
-    output = data_dir / f"{Path(IMAGE_NAME).name.removesuffix('.ome.tif')}_Cy3_deconvolved.tif"
+    output = out_dir / f"{Path(IMAGE_NAME).name.removesuffix('.ome.tif')}_Cy3_deconvolved.tif"
     tifffile.imwrite(output, recon_np, imagej=True, resolution=(1 / xy_um, 1 / xy_um),
                      metadata={"axes": "ZYX", "spacing": z_um, "unit": "micron"})
     print(f"Saved {output}")

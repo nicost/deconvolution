@@ -94,10 +94,12 @@ uv run src/pupil_psf.py --aberration spherical=0.3 --output PSF_spherical.tif
 # Give the folder with the data; optionally the PSF file (default PSF_605nm.tif)
 uv run src/deconvolve_gradient_consensus.py /path/to/BPAE_100x_ZStack_3Crop
 uv run src/deconvolve_gradient_consensus.py /path/to/data PSF_605nm.tif
+uv run src/deconvolve_gradient_consensus.py /path/to/data --output /path/to/results
 ```
 
-It deconvolves one channel of an OME-TIFF z-stack, saves the result next to the
-data as `..._deconvolved.tif`, and shows before/after maximum-intensity
+It deconvolves one channel of an OME-TIFF z-stack, saves the result as
+`..._deconvolved.tif` in a folder next to the data folder (see
+[Where results are saved](#where-results-are-saved)), and shows before/after maximum-intensity
 projections. The data defaults, channel, and a `CROP_XY` option (use the center
 of the image for a quick test on a CPU) are constants near the top of the file.
 
@@ -105,6 +107,7 @@ of the image for a quick test on a CPU) are constants near the top of the file.
 
 ```bash
 uv run src/deconvolve_semiblind.py /path/to/BPAE_100x_ZStack_3Crop
+uv run src/deconvolve_semiblind.py /path/to/BPAE_100x_ZStack_3Crop --output /path/to/results
 ```
 
 No separate PSF file is needed — the imaging conditions (NA, immersion index,
@@ -136,6 +139,15 @@ Micro-Manager and many acquisition tools. The PSF and all outputs are written as
 ImageJ TIFFs that carry the pixel size and z-step, so Fiji/ImageJ and these
 scripts read them back correctly. Edit the `IMAGE_NAME`, `CHANNEL`, and imaging
 constants at the top of a script to match your data.
+
+### Where results are saved
+
+Results are **never written inside the data folder**: Micro-Manager treats every
+TIFF in a dataset folder as part of the dataset, so extra files there break
+reading the data back. By default the deconvolution scripts save to a sibling
+folder named `<data folder>_deconvolved`, e.g. `/path/to/BPAE_100x_ZStack_3Crop`
+→ `/path/to/BPAE_100x_ZStack_3Crop_deconvolved/`. Use `-o/--output` to choose
+another folder; a folder inside the data folder is refused.
 
 ## Notes and limitations
 

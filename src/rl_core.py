@@ -15,6 +15,7 @@ improving the image and improving the PSF).
 
 import os
 import timeit
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -195,6 +196,27 @@ def gradient_consensus_deconvolve(image, otf, otfT, otfotfT, generator,
             break
 
     return recon
+
+
+def output_dir_for(data_dir, output=None):
+    """Folder to save results in, created if needed.
+
+    Results must NOT go inside the data folder: Micro-Manager treats every TIFF
+    in a dataset folder as part of the dataset, so extra files there break
+    reading the data back.  By default the results go in a sibling folder,
+    "<data folder>_deconvolved", next to the data folder.  'output' overrides
+    that, but may not be the data folder or a folder inside it."""
+    data_dir = Path(data_dir).expanduser().resolve()
+    if output is None:
+        out = data_dir.parent / f"{data_dir.name}_deconvolved"
+    else:
+        out = Path(output).expanduser().resolve()
+    if out == data_dir or data_dir in out.parents:
+        raise SystemExit(f"Error: the output folder {out} is inside the data folder "
+                         f"{data_dir}.\nSaving there would break reading the dataset "
+                         f"back in Micro-Manager; choose another folder with --output.")
+    out.mkdir(parents=True, exist_ok=True)
+    return out
 
 
 def show_mips(image, recon):
