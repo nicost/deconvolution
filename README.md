@@ -31,7 +31,11 @@ updating pixels where both halves agree. All of that needs a *correct* PSF —
 and the ideal PSF is usually a bit wrong, mostly because of **spherical
 aberration** when the immersion medium (e.g. oil, n≈1.515) does not match the
 sample (e.g. a watery cell, n≈1.33). `deconvolve_semiblind.py` closes that gap by
-fitting the PSF's aberrations to the data within a physically valid pupil model.
+fitting the PSF's aberrations within a physically valid pupil model. It does this
+by **model selection**: it deconvolves the image with several candidate PSFs and
+keeps the one whose result is sharpest (a wrong PSF leaves rings and haze). This
+side-steps the object/PSF degeneracy that defeats naive "deconvolve, then nudge
+the PSF" schemes, where the object estimate simply absorbs the PSF error.
 
 ## Requirements
 
@@ -103,13 +107,15 @@ of the image for a quick test on a CPU) are constants near the top of the file.
 uv run src/deconvolve_semiblind.py /path/to/BPAE_100x_ZStack_3Crop
 ```
 
-No separate PSF file is needed — it starts from the ideal PSF (from the imaging
-conditions set near the top of the file: NA, immersion index, wavelength) and
-fits a small set of Zernike aberrations, coarse to fine (spherical first, then
-the rest). It prints the fitted coefficients (in waves RMS) and saves both the
-**fitted PSF** (`..._PSF_fitted.tif`) and the **deconvolved stack**
-(`..._semiblind_deconvolved.tif`). On a CPU, set `CROP_XY` near the top of the
-file to try a small center crop first.
+No separate PSF file is needed — the imaging conditions (NA, immersion index,
+wavelength) are set near the top of the file. It searches a small set of Zernike
+aberrations by trying candidate PSFs and keeping the sharpest result (spherical
+first via a 1D scan, then the rest refined together). It prints the fitted
+coefficients (in waves RMS) and saves both the **fitted PSF**
+(`..._PSF_fitted.tif`) and the **deconvolved stack**
+(`..._semiblind_deconvolved.tif`). Each candidate costs one short deconvolution,
+so on a CPU set `CROP_XY` near the top of the file to try a small center crop
+first.
 
 ### 4. Check it works (no data required)
 
@@ -136,15 +142,15 @@ constants at the top of a script to match your data.
 - The semi-blind model uses **one PSF for the whole stack**. Real spherical
   aberration from an index mismatch grows with depth; this is a good
   approximation for thin samples but an approximation nonetheless.
-- The fitting schedule and step sizes (`E_STEPS`, `M_ITERS`, `ADAM_LR`,
-  `ROUNDS_PER_STAGE`, `L2_LAMBDA`) are constants near the top of
-  `deconvolve_semiblind.py`; you may need to adjust them for very different data.
-- **The aberration fit is still weak.** The PSF-fitting step works well when the
-  object is known, but in the full alternating loop the object estimate tends to
-  absorb the PSF error (the object/PSF degeneracy of blind deconvolution), so the
-  recovered aberration is currently smaller than the true one. Treat the fitted
-  coefficients as a first pass; strengthening this (e.g. an object sparsity prior
-  or joint optimization) is future work. See `tests/README.md`.
+- The aberration search is controlled by constants near the top of
+  `deconvolve_semiblind.py`: `ABERRATIONS` (which aberrations to fit),
+  `SPHERICAL_SCAN` (values tried for spherical), `SCORE_STEPS`, and
+  `REFINE_OTHERS`. Each candidate PSF costs one short deconvolution, so fitting
+  many aberrations on a large stack is slow — trim `ABERRATIONS` and/or set
+  `CROP_XY` to keep it quick, especially without a GPU.
+- The sharpness score rewards concentrated reconstructions, which suits
+  point-like and filamentous samples well; for very dense, uniform samples it is
+  less discriminating.
 - A GPU makes this much faster. Without one it still works; use `CROP_XY` to keep
   the first runs small.
 

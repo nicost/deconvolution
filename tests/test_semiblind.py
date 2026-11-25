@@ -1,17 +1,10 @@
-"""Tests for the semi-blind machinery.
+"""End-to-end test for semi-blind deconvolution.
 
-Two things are tested separately:
-
-1. The PSF-fitting step (m_step) on its own: given a good object estimate, can it
-   recover a known aberration?  This is the core differentiable machinery and it
-   is deterministic, so it is asserted strictly.
-
-2. The full alternating loop (E-step + M-step together), starting from a flat
-   object.  This currently recovers the aberration only weakly, because the
-   object estimate absorbs the PSF error (the classic object/PSF degeneracy of
-   blind deconvolution).  It is therefore marked xfail until the driver is
-   strengthened (e.g. an object sparsity prior / joint optimization).  Run the
-   quick tests only with:  pytest -m "not slow".
+The method fits the PSF by *model selection*: it deconvolves the image with
+several candidate PSFs and keeps the one that gives the sharpest result (see
+deconvolve_semiblind.py).  This test injects a known spherical aberration and
+checks that the search recovers it.  It is marked 'slow' (it runs several small
+deconvolutions); run the quick tests only with:  pytest -m "not slow".
 """
 import numpy as np
 import pytest
@@ -19,16 +12,10 @@ import torch
 
 import pupil_psf as pp
 import rl_core as rc
-from deconvolve_semiblind import m_step
+from deconvolve_semiblind import fit_coefficients, sharpness
 
 CPU = torch.device("cpu")
 XY, Z, WL, NA, NI = 0.0651, 0.26, 0.605, 1.40, 1.515
-
-
-def _norm_rmse(a, b):
-    a = a / a.sum()
-    b = b / b.sum()
-    return np.linalg.norm(a - b) / np.linalg.norm(b)
 
 
 def _sparse_object(nz, nxy, n_points, photons, seed=0):
@@ -40,69 +27,53 @@ def _sparse_object(nz, nxy, n_points, photons, seed=0):
     return obj
 
 
-def test_mstep_recovers_spherical_given_true_object():
-    """The PSF fit recovers a known spherical aberration when the object is known.
+def _make_image(model, nz, nxy, true_coeffs, seed=0):
+    obj = _sparse_object(nz, nxy, n_points=25, photons=400.0, seed=seed)
+    obj_t = torch.tensor(obj, device=CPU)
+    otf_t, _, _ = rc.otf_from_psf(model.render_numpy(true_coeffs), obj_t.shape, CPU)
+    rate = rc.fftconv(obj_t, otf_t, obj_t.shape).clamp(min=0)
+    return torch.poisson(rate, generator=torch.Generator(device=CPU).manual_seed(seed))
 
-    This isolates the differentiable pupil fit from the object/PSF degeneracy."""
+
+def test_sharpness_prefers_the_true_psf():
+    """The sharpness score (used by the fit) is highest for the correct PSF."""
     nz, nxy, nxy_psf = 9, 40, 25
-    true_sph = 0.30
-
     model = pp.PupilPSF(nxy_psf, nz, XY, Z, WL, NA, NI, device=CPU)
     sph = model.names.index("spherical")
 
-    obj = _sparse_object(nz, nxy, n_points=25, photons=400.0)
-    obj_t = torch.tensor(obj, device=CPU)
-
     true_coeffs = np.zeros(model.n_terms)
-    true_coeffs[sph] = true_sph
-    otf_t, _, _ = rc.otf_from_psf(model.render_numpy(true_coeffs), obj_t.shape, CPU)
-    rate = rc.fftconv(obj_t, otf_t, obj_t.shape).clamp(min=0)
-    image = torch.poisson(rate, generator=torch.Generator(device=CPU).manual_seed(0))
+    true_coeffs[sph] = 0.30
+    image = _make_image(model, nz, nxy, true_coeffs)
 
-    # Fit only spherical, with the true object held fixed.
-    active = torch.tensor([n == "spherical" for n in model.names], device=CPU)
-    coeffs = torch.zeros(model.n_terms, device=CPU, dtype=model.dtype)
-    coeffs = m_step(model, torch.fft.rfftn(obj_t), image, coeffs, active,
-                    iters=120, lr=1e-2, lam=1e-3)
+    def sharp_for(c):
+        coeffs = np.zeros(model.n_terms)
+        coeffs[sph] = c
+        psf = model.render_numpy(coeffs)
+        otf, otfT, otfotfT = rc.otf_from_psf(psf, image.shape, CPU)
+        gen = torch.Generator(device=CPU).manual_seed(0)
+        u = rc.gradient_consensus_deconvolve(image, otf, otfT, otfotfT, gen,
+                                             n_steps=50, verbose=False)
+        return sharpness(u.cpu().numpy())
 
-    assert abs(coeffs[sph].item() - true_sph) < 0.1, \
-        f"spherical not recovered: {coeffs[sph].item():.3f}"
+    # The true value should beat clearly-wrong ones on both sides.
+    assert sharp_for(0.30) > sharp_for(0.0)
+    assert sharp_for(0.30) > sharp_for(0.60)
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(reason="full alternating recovery is weak: the object estimate "
-                          "absorbs the PSF error (object/PSF degeneracy); "
-                          "strengthening the driver is future work",
-                   strict=False)
-def test_full_semiblind_recovers_spherical():
-    """End-to-end: flat start, alternate E/M, recover injected spherical."""
+def test_semiblind_recovers_spherical():
+    """The full search recovers an injected spherical aberration."""
     nz, nxy, nxy_psf = 9, 40, 25
     true_sph = 0.30
 
     model = pp.PupilPSF(nxy_psf, nz, XY, Z, WL, NA, NI, device=CPU)
     sph = model.names.index("spherical")
 
-    obj = _sparse_object(nz, nxy, n_points=20, photons=300.0)
-    obj_t = torch.tensor(obj, device=CPU)
-
     true_coeffs = np.zeros(model.n_terms)
     true_coeffs[sph] = true_sph
-    otf_t, _, _ = rc.otf_from_psf(model.render_numpy(true_coeffs), obj_t.shape, CPU)
-    rate = rc.fftconv(obj_t, otf_t, obj_t.shape).clamp(min=0)
-    gen = torch.Generator(device=CPU).manual_seed(0)
-    image = torch.poisson(rate, generator=gen)
+    image = _make_image(model, nz, nxy, true_coeffs)
 
-    coeffs = torch.zeros(model.n_terms, device=CPU, dtype=model.dtype)
-    recon = None
-    for stage in (["spherical"], list(pp.DEFAULT_ABERRATIONS)):
-        active = torch.tensor([n in stage for n in model.names], device=CPU)
-        for _ in range(2):
-            psf_np = model.render_numpy(coeffs.detach().cpu().numpy())
-            otf, otfT, otfotfT = rc.otf_from_psf(psf_np, image.shape, CPU)
-            recon = rc.gradient_consensus_deconvolve(
-                image, otf, otfT, otfotfT, gen, n_steps=15, recon=recon, verbose=False)
-            coeffs = m_step(model, torch.fft.rfftn(recon.detach()), image,
-                            coeffs, active, iters=40, lr=1e-2, lam=1e-3)
-
-    assert 0.1 < coeffs[sph].item() < 0.6, \
-        f"spherical not recovered: {coeffs[sph].item():.3f}"
+    # refine=False: spherical scan only (fast and deterministic).
+    coeffs = fit_coefficients(model, image, CPU, refine=False, verbose=False)
+    assert abs(coeffs[sph] - true_sph) < 0.1, \
+        f"spherical not recovered: {coeffs[sph]:.3f}"

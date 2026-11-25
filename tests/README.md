@@ -35,17 +35,7 @@ scripts from `src/`.
 | `test_zernike.py` | Zernike polynomials: Noll index mapping, RMS normalization, the closed form for spherical, and orthogonality. |
 | `test_pupil_psf.py` | The pupil→PSF model: PSF sums to 1, is non-negative and centered; the zero-aberration PSF matches `make_airy_psf`; `render()` is differentiable; spherical aberration breaks axial symmetry. |
 | `test_rl_core.py` | The deconvolution engine: PSF centering/normalization, KL divergence, FFT convolution with a delta is the identity, the two OTF code paths agree, and deconvolution actually sharpens a blurred image. |
-| `test_semiblind.py` | The PSF-fitting step recovers a known spherical aberration when the object is known (deterministic). The full alternating loop from a flat start is marked `slow` + `xfail` — see below. |
-
-### Known limitation (the `xfail` test)
-
-`test_full_semiblind_recovers_spherical` is expected to fail (`xfail`). Fitting
-the PSF works when the object is known (`test_mstep_recovers_spherical_given_true_object`
-passes), but the full alternating loop currently recovers the aberration only
-weakly: the object estimate absorbs the PSF error (the classic object/PSF
-degeneracy of blind deconvolution). Strengthening the driver — e.g. an object
-sparsity prior or joint optimization — is future work. The test is kept (not
-deleted) so that any future improvement shows up as an unexpected pass (`xpass`).
+| `test_semiblind.py` | The sharpness score prefers the correct PSF, and the full model-selection search recovers a known injected spherical aberration (the search is marked `slow`). |
 
 ## Notes
 
