@@ -1,9 +1,11 @@
 """End-to-end test for semi-blind deconvolution.
 
-The method fits the PSF by *model selection*: it deconvolves the image with
-several candidate PSFs and keeps the one that gives the sharpest result (see
-deconvolve_semiblind.py).  This test injects a known spherical aberration and
-checks that the search recovers it.  It is marked 'slow' (it runs several small
+The method fits the PSF by *model selection*: it deconvolves half of the photons
+with each candidate PSF and keeps the one that best predicts the other half (see
+deconvolve_semiblind.py).  These tests inject a known spherical aberration and
+check that the search recovers it, and that the held-out score does not reward a
+PSF that is too broad on a dense sample (the failure of the older sharpness
+score).  It is marked 'slow' (it runs several small
 deconvolutions); run the quick tests only with:  pytest -m "not slow".
 """
 import numpy as np
@@ -12,7 +14,9 @@ import torch
 
 import pupil_psf as pp
 import rl_core as rc
-from deconvolve_semiblind import fit_coefficients, sharpness
+from deconvolve_semiblind import (center_psf_z, fit_coefficients, heldout_score,
+                                  render_psf, sharpness, split_halves)
+from scipy.ndimage import gaussian_filter
 
 CPU = torch.device("cpu")
 XY, Z, WL, NA, NI = 0.0651, 0.26, 0.605, 1.40, 1.515
@@ -27,12 +31,40 @@ def _sparse_object(nz, nxy, n_points, photons, seed=0):
     return obj
 
 
-def _make_image(model, nz, nxy, true_coeffs, seed=0):
-    obj = _sparse_object(nz, nxy, n_points=25, photons=400.0, seed=seed)
+def _dense_object(nz, nxy, seed=0):
+    """Smooth, densely packed blobs on a dim background (cell-like)."""
+    rng = np.random.default_rng(seed)
+    noise = gaussian_filter(rng.random((nz, nxy, nxy)), sigma=(1.0, 2.5, 2.5))
+    obj = np.clip(noise - np.percentile(noise, 70), 0, None)
+    return (obj * (30.0 / obj.mean()) + 2.0).astype(np.float32)
+
+
+def _make_image(model, nz, nxy, true_coeffs, seed=0, obj=None):
+    if obj is None:
+        obj = _sparse_object(nz, nxy, n_points=25, photons=400.0, seed=seed)
     obj_t = torch.tensor(obj, device=CPU)
-    otf_t, _, _ = rc.otf_from_psf(model.render_numpy(true_coeffs), obj_t.shape, CPU)
+    otf_t, _, _ = rc.otf_from_psf(render_psf(model, true_coeffs), obj_t.shape, CPU)
     rate = rc.fftconv(obj_t, otf_t, obj_t.shape).clamp(min=0)
     return torch.poisson(rate, generator=torch.Generator(device=CPU).manual_seed(seed))
+
+
+def test_center_psf_z_puts_the_brightest_plane_in_the_middle():
+    model = pp.PupilPSF(25, 15, XY, Z, WL, NA, NI, aberrations=["spherical"], device=CPU)
+    raw = model.render_numpy([0.4])            # spherical shifts best focus
+    centered = center_psf_z(raw)
+    assert np.argmax(centered.sum(axis=(1, 2))) == 15 // 2
+    assert np.isclose(centered.sum(), raw.sum())
+
+
+def test_heldout_score_does_not_reward_a_too_broad_psf():
+    """On a dense sample, a PSF with too much aberration scores worse than the
+    true one (the sharpness score gets this wrong)."""
+    nz, nxy, nxy_psf = 11, 48, 31
+    model = pp.PupilPSF(nxy_psf, nz, XY, Z, WL, NA, NI, aberrations=["spherical"],
+                        device=CPU)
+    image = _make_image(model, nz, nxy, np.array([0.2]), obj=_dense_object(nz, nxy))
+    halves = split_halves(image)
+    assert heldout_score(model, [0.2], halves, CPU) < heldout_score(model, [0.6], halves, CPU)
 
 
 def test_sharpness_prefers_the_true_psf():
@@ -48,7 +80,7 @@ def test_sharpness_prefers_the_true_psf():
     def sharp_for(c):
         coeffs = np.zeros(model.n_terms)
         coeffs[sph] = c
-        psf = model.render_numpy(coeffs)
+        psf = render_psf(model, coeffs)
         otf, otfT, otfotfT = rc.otf_from_psf(psf, image.shape, CPU)
         gen = torch.Generator(device=CPU).manual_seed(0)
         u = rc.gradient_consensus_deconvolve(image, otf, otfT, otfotfT, gen,

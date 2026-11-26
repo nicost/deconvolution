@@ -14,14 +14,33 @@ numbers to the data.
 How we fit them.  A naive approach -- deconvolve, then nudge the PSF to fit the
 same image better -- does not work: the deconvolved image simply absorbs the PSF
 error, so there is nothing left to fit (the "object/PSF degeneracy" of blind
-deconvolution).  Instead we use *model selection*: we try different aberrations,
-deconvolve the image with each candidate PSF, and keep the one whose result is
-**sharpest**.  A wrong PSF leaves rings and haze (a blurry, spread-out result); the
-right PSF gives a crisp one.  "Sharpness" is measured as sum(u^2) / sum(u)^2,
-which is large when the light is concentrated and small when it is spread out.
+deconvolution).  Instead we use *model selection*: we try different aberrations
+and keep the PSF that best **predicts data it has not seen**:
 
-We search spherical aberration first (the big one, and just one number, so a
-quick 1D scan finds it reliably), then refine the remaining aberrations together.
+  - Split the recorded image once into two half images (each photon goes to one
+    half or the other).  Both show the same sample, with independent noise.
+  - Deconvolve half A with the candidate PSF, blur the result with that PSF
+    again, and measure how well this prediction matches half B (the Poisson
+    likelihood).  Then swap A and B, and average.
+
+A PSF that is too *broad* can only reproduce the fine detail of half A by also
+reproducing its noise, which does not carry over to half B, so it scores badly.
+A PSF that is too *narrow* can partly mimic the right one (the deconvolved
+image just stays a bit blurrier), so when the data is ambiguous the fit leans
+towards the ideal, unaberrated PSF: it should not do much worse than the
+theoretical PSF, and only moves away from it when the data clearly asks.
+
+(Earlier versions kept the PSF whose deconvolution was *sharpest*.  That works
+for sparse points, but on real cells it picks PSFs that are far too broad, which
+over-sharpen the image into speckles.  Set SCORE = "sharpness" to compare.)
+
+By default only spherical aberration (the big one, from the index mismatch) is
+fitted, with a quick 1D scan.  More aberrations can be added to ABERRATIONS and
+refined together afterwards (REFINE_OTHERS), but every extra free number makes
+the fit less reliable.
+
+The fitted PSF is re-centered in z: spherical aberration moves the plane of
+best focus, which would otherwise shift the whole deconvolved stack in z.
 
 Run it (after the data is in place) with:
 
@@ -33,9 +52,8 @@ The fitted aberrations are printed and before/after projections are shown.  The
 refined PSF and the deconvolved stack are saved in a folder next to the data
 folder, "<data folder>_deconvolved" (or the folder given with --output).  They
 are never saved inside the data folder: Micro-Manager would then fail to read
-the dataset back.  Each candidate
-PSF costs one (short) deconvolution, so without a GPU set CROP_XY below and/or
-trim ABERRATIONS to keep the search quick.
+the dataset back.  Each candidate PSF costs two short deconvolutions (of the
+half images), so without a GPU set CROP_XY below to keep the search quick.
 """
 
 import argparse
@@ -48,8 +66,8 @@ import tifffile
 
 from pupil_psf import (DEFAULT_ABERRATIONS, PupilPSF, _save_psf_tiff, _show_psf,
                        odd_size)
-from rl_core import (gradient_consensus_deconvolve, otf_from_psf, output_dir_for,
-                     pick_device, show_mips, torch)
+from rl_core import (fftconv, gradient_consensus_deconvolve, otf_from_psf,
+                     output_dir_for, pick_device, show_mips, torch)
 
 DATA_DIR = Path("~/Images/BPAE_100x_ZStack_3Crop").expanduser()
 IMAGE_NAME = "BPAE_100x_ZStack_3_MMStack_Pos0.ome.tif"
@@ -62,18 +80,27 @@ N_IMMERSION = 1.515               # immersion oil (the sample is more like 1.33,
 WAVELENGTH_NM = 605               # Cy3 emission
 
 PSF_SIZE_XY_UM = 4.0              # width/height of the PSF (microns)
+PSF_SIZE_Z_UM = 8.0               # depth of the PSF (microns), as in make_airy_psf.py
 
 # Which aberrations may be fitted (waves RMS).  Spherical is always searched
-# first with a 1D scan; the rest are refined together afterwards.  Trim this list
-# to make the search faster.
-ABERRATIONS = DEFAULT_ABERRATIONS
+# first with a 1D scan; any others are refined together afterwards (if
+# REFINE_OTHERS).  Spherical alone is the most reliable choice for real data;
+# to fit more, use e.g. ABERRATIONS = DEFAULT_ABERRATIONS, REFINE_OTHERS = True.
+ABERRATIONS = ["spherical"]
+
+# How candidate PSFs are compared: "heldout" (how well the PSF predicts an
+# independent half of the photons; recommended) or "sharpness" (the older
+# criterion, which picks PSFs that are too broad on non-sparse samples).
+SCORE = "heldout"
 
 # Spherical-aberration values tried in the first (1D) scan.
-SPHERICAL_SCAN = np.round(np.arange(-0.3, 0.61, 0.1), 3)
+SPHERICAL_SCAN = np.round(np.arange(-0.5, 0.51, 0.1), 3)
 SCORE_STEPS = 50                  # deconvolution steps used when scoring a candidate
-REFINE_OTHERS = True              # after spherical, refine the other aberrations
-REFINE_MAXITER = 3               # Powell passes over the other aberrations
-COEFF_BOUND = 1.0                 # keep |coefficient| <= this many waves
+                                  # (fixed; with much fewer the held-out score
+                                  # underestimates the aberration)
+REFINE_OTHERS = False             # after spherical, refine the other aberrations
+REFINE_MAXITER = 3                # Powell passes over the other aberrations
+COEFF_BOUND = 0.5                 # keep |coefficient| <= this many waves
 
 # Use only the center of the image (e.g. CROP_XY = 256) to try things out quickly.
 CROP_XY = None
@@ -90,27 +117,70 @@ def sharpness(u):
     return float((u * u).sum() / (s * s + 1e-12))
 
 
+def center_psf_z(psf):
+    """Move the PSF along z so that its brightest plane is the center plane.
+
+    Spherical aberration shifts the plane of best focus.  The deconvolution
+    treats the PSF's center plane as "no shift", so an off-center PSF would
+    shift the whole deconvolved stack in z (and wrap planes around)."""
+    axial = psf.sum(axis=(1, 2))
+    return np.roll(psf, psf.shape[0] // 2 - int(np.argmax(axial)), axis=0)
+
+
+def render_psf(model, coeffs):
+    """The PSF for these Zernike coefficients, re-centered in z."""
+    return center_psf_z(model.render_numpy(np.asarray(coeffs)))
+
+
 def deconvolve_with(model, coeffs, image, device, n_steps=None):
     """Deconvolve 'image' using the PSF for these Zernike coefficients.
 
     A fresh, identically-seeded generator is used so that comparing two
     candidates is fair (same random photon splits)."""
-    psf_np = model.render_numpy(np.asarray(coeffs))
-    otf, otfT, otfotfT = otf_from_psf(psf_np, image.shape, device)
+    otf, otfT, otfotfT = otf_from_psf(render_psf(model, coeffs), image.shape, device)
     gen = torch.Generator(device=device).manual_seed(SEED)
     return gradient_consensus_deconvolve(
         image, otf, otfT, otfotfT, gen, n_steps=n_steps, verbose=False)
 
 
-def score(model, coeffs, image, device):
-    """Lower is better: the negative sharpness of a fixed-length deconvolution.
+def split_halves(image, seed=SEED + 1):
+    """Split the image into two half images with independent photon noise."""
+    gen = torch.Generator(device=image.device).manual_seed(seed)
+    a = torch.binomial(image, torch.full_like(image, 0.5), generator=gen)
+    return a, image - a
 
-    Candidates are penalized for straying outside +/- COEFF_BOUND waves."""
+
+def heldout_score(model, coeffs, halves, device):
+    """Lower is better: how badly the PSF predicts photons it was not fitted to.
+
+    Deconvolve one half image, blur the result with the same PSF, and compute
+    the Poisson negative log-likelihood of the *other* half; both ways round."""
+    otf, otfT, otfotfT = otf_from_psf(render_psf(model, coeffs), halves[0].shape, device)
+    total = 0.0
+    for fit, test in (halves, halves[::-1]):
+        gen = torch.Generator(device=device).manual_seed(SEED)
+        u = gradient_consensus_deconvolve(fit, otf, otfT, otfotfT, gen,
+                                          n_steps=SCORE_STEPS, verbose=False)
+        mu = fftconv(u, otf, fit.shape).clamp(min=1e-6)      # predicted photons
+        total += (mu - test * torch.log(mu)).mean().item()
+    return total / 2
+
+
+def score(model, coeffs, image, device, halves=None):
+    """Lower is better: the held-out likelihood (SCORE = "heldout") or the
+    negative sharpness of a fixed-length deconvolution (SCORE = "sharpness").
+
+    Candidates are penalized for straying outside +/- COEFF_BOUND waves.
+    'halves' (from split_halves) lets all candidates share one split."""
     coeffs = np.asarray(coeffs, dtype=float)
-    if np.any(np.abs(coeffs) > COEFF_BOUND):
+    if np.any(np.abs(coeffs) > COEFF_BOUND + 1e-9):
         return 1e9 + float(np.sum(np.abs(coeffs)))
-    u = deconvolve_with(model, coeffs, image, device, n_steps=SCORE_STEPS)
-    return -sharpness(u.cpu().numpy())
+    if SCORE == "heldout":
+        return heldout_score(model, coeffs, halves or split_halves(image), device)
+    if SCORE == "sharpness":
+        u = deconvolve_with(model, coeffs, image, device, n_steps=SCORE_STEPS)
+        return -sharpness(u.cpu().numpy())
+    raise ValueError(f"unknown SCORE {SCORE!r}; use 'heldout' or 'sharpness'")
 
 
 def _parabola_min(x, y):
@@ -122,15 +192,16 @@ def _parabola_min(x, y):
 
 
 def fit_coefficients(model, image, device, refine=REFINE_OTHERS, verbose=True):
-    """Find the Zernike coefficients whose PSF deconvolves the image sharpest."""
+    """Find the Zernike coefficients whose PSF scores best (see score())."""
     coeffs = np.zeros(model.n_terms)
     sph = model.names.index("spherical")
+    halves = split_halves(image) if SCORE == "heldout" else None  # one split for all
 
     # --- 1D scan over spherical aberration ---
     scores = []
     for c in SPHERICAL_SCAN:
         coeffs[sph] = c
-        scores.append(score(model, coeffs, image, device))
+        scores.append(score(model, coeffs, image, device, halves))
         if verbose:
             print(f"  spherical = {c:+.2f}  score = {scores[-1]:.4e}")
     i = int(np.argmin(scores))
@@ -146,10 +217,10 @@ def fit_coefficients(model, image, device, refine=REFINE_OTHERS, verbose=True):
         from scipy.optimize import minimize
         if verbose:
             print("  refining the other aberrations (Powell)...")
-        res = minimize(lambda v: score(model, v, image, device), coeffs,
+        res = minimize(lambda v: score(model, v, image, device, halves), coeffs,
                        method="Powell", bounds=[(-COEFF_BOUND, COEFF_BOUND)] * model.n_terms,
                        options={"maxiter": REFINE_MAXITER, "xtol": 1e-2, "ftol": 1e-3})
-        if res.fun <= score(model, coeffs, image, device):
+        if res.fun <= score(model, coeffs, image, device, halves):
             coeffs = res.x
     return coeffs
 
@@ -184,16 +255,17 @@ if __name__ == "__main__":
 
     # --- Build the differentiable PSF model -------------------------------------
     nxy_psf = min(odd_size(PSF_SIZE_XY_UM, xy_um), nx if nx % 2 else nx - 1)
-    model = PupilPSF(nxy_psf, nz, xy_um, z_um, WAVELENGTH_NM / 1000, NA, N_IMMERSION,
+    nz_psf = min(odd_size(PSF_SIZE_Z_UM, z_um), nz if nz % 2 else nz - 1)
+    model = PupilPSF(nxy_psf, nz_psf, xy_um, z_um, WAVELENGTH_NM / 1000, NA, N_IMMERSION,
                      aberrations=ABERRATIONS, device=device)
-    print(f"PSF model: {nz} x {nxy_psf} x {nxy_psf}, pupil {model.N} px "
+    print(f"PSF model: {nz_psf} x {nxy_psf} x {nxy_psf}, pupil {model.N} px "
           f"(radius {model.R_pix:.0f}), fitting {model.names}")
 
     image = torch.tensor(image_np.astype(np.float32), device=device)
 
     # --- Fit the PSF by model selection, then deconvolve to convergence ---------
     start = timeit.default_timer()
-    print("Fitting the PSF aberrations...")
+    print(f"Fitting the PSF aberrations (score: {SCORE}, lower is better)...")
     coeffs = fit_coefficients(model, image, device)
     print("Deconvolving with the fitted PSF...")
     recon = deconvolve_with(model, coeffs, image, device, n_steps=None)
@@ -205,7 +277,7 @@ if __name__ == "__main__":
 
     # --- Save the refined PSF and the deconvolved stack -------------------------
     stem = Path(IMAGE_NAME).name.removesuffix('.ome.tif')
-    psf_np = model.render_numpy(coeffs)
+    psf_np = render_psf(model, coeffs)                 # re-centered, as used
     psf_out = out_dir / f"{stem}_Cy3_PSF_fitted.tif"
     _save_psf_tiff(psf_np, psf_out, xy_um, z_um)
     print(f"Saved {psf_out}")
